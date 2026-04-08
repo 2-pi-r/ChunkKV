@@ -136,7 +136,9 @@ class BasePress:
         q_len = hidden_states.shape[1]
 
         # Don't compress after pre-filling
-        if kwargs["cache_position"][-1] > q_len:
+        # if kwargs["cache_position"][-1] > q_len:
+        cache_pos = kwargs.get("cache_position")
+        if cache_pos is not None and cache_pos[-1] > q_len:
             return output
 
         keys, values = extract_keys_and_values(cache, module.layer_idx)
