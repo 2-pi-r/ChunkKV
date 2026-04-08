@@ -37,6 +37,7 @@ class SnapKVPress(ScorerPress):
     compression_ratio: float = 0.0
     window_size: int = 64
     kernel_size: int = 5
+    captured_scores = [] # score 분포 관찰용
 
     @staticmethod
     def compute_window_attention(module, hidden_states, keys, window_size, position_embeddings):
@@ -102,4 +103,5 @@ class SnapKVPress(ScorerPress):
         # Add back the observation window. Use max score to make sure the window is not pruned.
         scores = F.pad(scores, (0, self.window_size), value=scores.max().item())
 
+        self.captured_scores.append(scores.detach().cpu()) # score 분포 관찰용
         return scores
