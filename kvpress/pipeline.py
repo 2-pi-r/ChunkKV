@@ -17,6 +17,7 @@ from kvpress.presses.dms_press import DMSPress
 from kvpress.presses.finch_press import FinchPress
 from kvpress.presses.key_rerotation_press import KeyRerotationPress
 from kvpress.presses.prefill_decoding_press import PrefillDecodingPress
+from kvpress.presses.variable_chunkkv_press import VariableChunkKVPress
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,7 @@ class KVPressTextGenerationPipeline(Pipeline):
             self.model.model(
                 input_ids=context_ids,
                 past_key_values=cache,
+                output_attentions=True if isinstance(press, VariableChunkKVPress) else False, # [추가] Attention Matrix를 계산하도록 설정
             )
 
             logger.debug(f"Context Length: {context_length}")
