@@ -76,85 +76,89 @@ class VariableChunkKVPress(BasePress):
 
         # 2. Divide sequence into chunks
         top_tokens = global_scores.topk(num_seeds, dim=-1) # seeds for clustering    # top_tokens.indices: (batch_size, num_seeds)
-        top_tokens_indices = top_tokens.indices[0].sort()[0]
+        seed_indices = top_tokens.indices[0] #.sort()[0]
 
         # attentions : torch.Tensor: Attention weights from the layer with shape (batch_size, num_heads, seq_len, seq_len) # weight니까 정규화된 거겠지?
-        # print(kv_len)
         chunk_boundary = [] # 2차원 list of [start_idx, end_idx]
+        raw_chunk_boundary = []
 
-        # if isinstance(self.press, SnapKVPress):
-        #     chunk_boundary.append([kv_len - self.press.window_size, kv_len])
-    
-        for seed_idx in top_tokens_indices:
-            # print(f"[{chunk_id}, {seed_idx}]")
+        for seed_idx_tensor in seed_indices:
+            seed_idx = seed_idx_tensor.item()
+
             start_idx = max(0, seed_idx - self.max_chunk_size // 2)
             end_idx = min(kv_len, seed_idx + 1 + self.max_chunk_size // 2)
-
             # Get and Update start_idx
             for j in range(seed_idx - 1, start_idx - 1, -1): # 앞 토큰들 (seed_idx 미만, start_idx 이상)
-                # print(f"{j} ", end="")
                 if attentions[0, :, seed_idx, j].mean() < self.threshold:
                     start_idx = j + 1 # threshold 못 넘기 직전까지 청킹
-                    # print(f" << start!", end="")
                     break
-            # print("")
-            
             # Get and Update end_idx
             for j in range(seed_idx + 1, end_idx): # 뒤 토큰들
-                # print(f"{j} ", end="")
                 if attentions[0, :, j, seed_idx].mean() < self.threshold:
-                    # print(f" << end!", end="")
                     end_idx = j # threshold 못 넘기 직전까지 청킹
                     break
-
-            # Apply them to chunk_boundary
-            if len(chunk_boundary) == 0 or chunk_boundary[-1][1] < start_idx: # if no overlap (prev_end < start_idx)
+            
+            raw_chunk_boundary.append([start_idx, end_idx])
+        
+        # Merge overlapped chunks
+        raw_chunk_boundary.sort(key=lambda x: x[0]) # start_idx 기준 오름차순 정렬
+        for start_idx, end_idx in raw_chunk_boundary:
+            if len(chunk_boundary) == 0 or chunk_boundary[-1][1] <= start_idx: # if no overlap (prev_end <= start_idx)
                 chunk_boundary.append([start_idx, end_idx])
             else: # if overlap
                 chunk_boundary[-1][0] = min(chunk_boundary[-1][0], start_idx) # prev_start = min(prev_start, start_idx)
                 chunk_boundary[-1][1] = max(chunk_boundary[-1][1], end_idx) # prev_end = max(prev_end, end_idx)
-                
-            # print("")
-        
+
 
         # 3. Calculate chunk_scores from scores
-        chunk_scores = torch.empty(bsz, num_seeds)
-        for i in range(num_seeds):
+        chunk_scores = torch.empty(bsz, len(chunk_boundary))
+        for i in range(len(chunk_boundary)):
             curr_global_scores = global_scores[..., chunk_boundary[i][0]: chunk_boundary[i][1]] # chunk에 해당하는 score들을 가져다가
-            chunk_scores[i] = curr_global_scores.mean(dim=-1, keepdim=True)
+            chunk_scores[0][i] = curr_global_scores.mean(dim=-1, keepdim=True)
 
 
         # 4. Select chunks to preserve
-        indices = []
-        budget = kv_len * (1 - self.compression_ratio) # 남길 토큰 개수
+        indices_bitmap = torch.zeros(kv_len, dtype=torch.bool, device=keys.device)
+        budget = int(kv_len * (1 - self.compression_ratio)) # 남길 토큰 개수
 
         sorted_chunk_scores = torch.sort(chunk_scores, descending=True, dim=-1)
-        i = 0
 
-        while(i < num_seeds and budget > 0):
-            chunk_idx = sorted_chunk_scores.indices[0][i]
+        for chunk_idx in sorted_chunk_scores.indices[0]:
+            if(budget <= 0): break
+
             chunk_len = chunk_boundary[chunk_idx][1] - chunk_boundary[chunk_idx][0]
             if budget < chunk_len:
                 # 청크 안에서 topk로 토큰 budget개 선택
-                _, chunk_indices = global_scores[0, chunk_boundary[chunk_idx][0] : chunk_boundary[chunk_idx][1]].topk(budget, dim=-1)
-                indices.append(chunk_indices)
+                _, curr_indices = global_scores[0, chunk_boundary[chunk_idx][0] : chunk_boundary[chunk_idx][1]].topk(budget, dim=-1)
+                indices_bitmap[chunk_boundary[chunk_idx][0] + curr_indices] = True # topk는 주어진 범위 안에서의 인덱스. 청크의 시작 주소를 더해줘야 함.
+                budget = 0
                 break
-            chunk_indices = torch.arange(chunk_boundary[chunk_idx][0], chunk_boundary[chunk_idx][1], device=keys.device)
-            indices.append(chunk_indices)
+            indices_bitmap[chunk_boundary[chunk_idx][0] : chunk_boundary[chunk_idx][1]] = True
             budget -= chunk_len
+        
+       
+        # print(f"---------")
+        # print(f"1. chunk_boundary: {len(chunk_boundary)}\n", chunk_boundary)
+        # # print(f"2. seed_indices: {seed_indices.shape}\n ", seed_indices)
+        # # print(f"3. chunk_scores: {chunk_scores.shape}\n", chunk_scores)
+        # print(f"4. remaining budget: {budget}")
+
 
         if budget > 0:
-            pass # TODO: 뒤에서부터 토큰 budget개 선택
+            global_scores[0, indices_bitmap] = float('-inf')
+            curr_indices = global_scores[0].topk(budget, dim=-1).indices
+            indices_bitmap[curr_indices] = True
 
-        indices = torch.cat(indices).sort()[0]
+            # 뒤에서부터 아직 선택되지 않은 토큰 budget개 선택
+            # curr_indices = torch.where(~indices_bitmap)[0][-budget:]
+            # indices_bitmap[curr_indices] = True
+
+        indices = torch.where(indices_bitmap)[0].sort()[0]
         indices = indices.view(1, 1, -1, 1).expand(keys.shape[0], keys.shape[1], -1, module.head_dim)
-
-        """출력"""
-        print(f"-------")
-        print(f"1. chunk_boundary: ", chunk_boundary)
-        print(f"2. seed_indices: {top_tokens.indices[0].shape}\n ", top_tokens.indices[0])
-        print(f"3. chunk_scores: {chunk_scores.shape}\n", chunk_scores)
-        print(f"4. indices: {indices.shape}\n", indices)
+        
+        # print(f"4. indices: {indices.shape}\n", indices)
+        # print(f"5. indices_bitmap: {indices_bitmap.shape}\n", indices_bitmap)
+        # print(f"6. attentions: {attentions.shape}\n")
 
         # 5. Use gather to collect selected keys and values
         keys = keys.gather(2, indices).contiguous()

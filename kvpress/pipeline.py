@@ -215,11 +215,12 @@ class KVPressTextGenerationPipeline(Pipeline):
         perform_prefill_compression = press is not None and not isinstance(press, DecodingPress)
         with press(self.model) if perform_prefill_compression else contextlib.nullcontext():
             # We run the model without the lm head for pre-filling.
-            self.model.model(
-                input_ids=context_ids,
-                past_key_values=cache,
-                output_attentions=True if isinstance(press, VariableChunkKVPress) else False, # [추가] Attention Matrix를 계산하도록 설정
-            )
+            with torch.no_grad(): # [추가] 메모리 사용량 줄이도록
+                self.model.model(
+                    input_ids=context_ids,
+                    past_key_values=cache,
+                    output_attentions=True #if isinstance(press, VariableChunkKVPress) else False, # [추가] Attention Matrix를 계산하도록 설정
+                )
 
             logger.debug(f"Context Length: {context_length}")
             logger.debug(f"Compressed Context Length: {cache.get_seq_length()}")
