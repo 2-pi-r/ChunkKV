@@ -5,11 +5,14 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+import numpy as np
 
 from kvpress.presses.base_press import BasePress
 from kvpress.presses.scorer_press import ScorerPress
 from kvpress.presses.snapkv_press import SnapKVPress
 
+import matplotlib.pyplot as plt
+import os
 
 @dataclass
 class VariableChunkKVPress(BasePress):
@@ -26,7 +29,7 @@ class VariableChunkKVPress(BasePress):
 
     press: ScorerPress
     threshold: float # 0.0-1.0
-    max_chunk_size: int = 20
+    max_chunk_size: int = 40
     seed_ratio: float = 0.05 # num_seeds = kv_len * ratio
 
     def __post_init__(self):
@@ -57,7 +60,7 @@ class VariableChunkKVPress(BasePress):
             return keys, values
 
         assert attentions is not None, "VariableChunkKV needs attentions."
-
+        
         kv_len = keys.shape[2]
         bsz = keys.shape[0]
 
@@ -164,4 +167,53 @@ class VariableChunkKVPress(BasePress):
         keys = keys.gather(2, indices).contiguous()
         values = values.gather(2, indices).contiguous()
 
+        layer_idx = getattr(module, "layer_idx", "unknown")
+        unique_seeds = []
+        for s in seed_indices:
+            s_val = s.item()
+            if all(abs(s_val - existing) > 100 for existing in unique_seeds):
+                unique_seeds.append(s_val)
+            if len(unique_seeds) >= 5: # 대표 시드 5개만 확보
+                break
+        unique_seeds.sort()
+        if layer_idx in [2, 14, 25]: # 첫 번째, 중간, 마지막 레이어 샘플링
+            self._visualize_attention_distribution(attentions, unique_seeds, layer_idx, kv_len)
+
         return keys, values
+    
+    def _visualize_attention_distribution(self, attentions, unique_seeds, layer_idx, kv_len):
+        # 1. 특정 Seed 하나를 골라 주변 어텐션 분포 확인 (Decay 관찰)
+        window_size = 100 # max_chunk_size보다 넓게 설정
+        plt.figure(figsize=(10, 6))
+        
+        for i, target_seed in enumerate(unique_seeds):
+            start = max(0, target_seed - window_size // 2)
+            end = min(kv_len, target_seed + window_size // 2)
+            
+            # 해당 시드의 주변 어텐션 값 (헤드 평균)
+            backward_dist = attentions[0, :, target_seed, start : target_seed + 1].mean(dim=0)
+            forward_dist = attentions[0, :, target_seed + 1 : end, target_seed].mean(dim=0)
+            around_attn = torch.cat([backward_dist, forward_dist]).cpu().float().numpy() # shape: (window_range,)
+
+            # 3X축을 시드 중심의 상대적 거리로 설정 (-50 ~ +50)
+            rel_x = np.arange(start - target_seed, end - target_seed)
+            
+            # 개별 시드 그래프 (겹쳐 보이도록 투명도 조정)
+            plt.plot(rel_x, around_attn, alpha=0.4, label=f'Seed {target_seed}' if i < 5 else "")
+
+        plt.axvline(x=0, color='black', linestyle='--', linewidth=1.5)
+        
+        # 0.01, 0.001 등 후보 threshold도 같이 그려보면 분석에 도움됩니다
+        # plt.axhline(y=0.01, color='gray', linestyle='--')
+        # plt.axhline(y=0.001, color='gray', linestyle='--')
+        
+        plt.title(f"Layer {layer_idx} - Overlaid Attention Decay (Log Scale)")
+        plt.xlabel("Relative Token Index from Seed")
+        plt.ylabel("Attention Weight to Seed")
+        plt.yscale('log')
+        plt.grid(True, which="both", ls="-", alpha=0.2)
+        plt.legend(loc='upper right', fontsize='small')
+        
+        os.makedirs("attn_plots", exist_ok=True)
+        plt.savefig(f"attn_plots/layer_{layer_idx}_overlaid_seeds.png")
+        plt.close()
