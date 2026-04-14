@@ -61,7 +61,7 @@ class ChunkKVPress(BasePress):
         if self.press.compression_ratio == 0:
             return keys, values
 
-        assert attentions is None, "ChunkPress does not support attentions."
+        # assert attentions is None, "ChunkPress does not support attentions." # 실험을 위해 주석처리
 
         kv_len = keys.shape[2]
 

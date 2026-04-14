@@ -40,6 +40,7 @@ from kvpress import (
     StreamingLLMPress,
     ThinKPress,
     TOVAPress,
+    VariableChunkKVPress,
 )
 
 # These dictionaries define the available datasets, scorers, and KVPress methods for evaluation.
@@ -105,6 +106,7 @@ PRESS_REGISTRY = {
     "tova": TOVAPress(),
     "compactor": CompactorPress(),
     "adakv_compactor": AdaKVPress(CompactorPress()),
+    "variable_chunkkv": VariableChunkKVPress(press=SnapKVPress(), threshold=0.01),
     "no_press": None,
     "decoding_knorm": DecodingPress(base_press=KnormPress()),
     "decoding_streaming_llm": DecodingPress(base_press=StreamingLLMPress()),
