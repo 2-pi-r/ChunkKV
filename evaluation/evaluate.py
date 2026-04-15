@@ -18,7 +18,7 @@ from datasets import load_dataset
 from evaluate_registry import DATASET_REGISTRY, PRESS_REGISTRY, SCORER_REGISTRY
 from fire import Fire
 from tqdm import tqdm
-from transformers import FineGrainedFP8Config, Pipeline, pipeline
+from transformers import FineGrainedFP8Config, Pipeline, pipeline, BitsAndBytesConfig, AutoModelForCausalLM, AutoTokenizer
 
 from kvpress import (
     ComposedPress,
@@ -360,7 +360,8 @@ class EvaluationRunner:
         model_kwargs = self.config.model_kwargs or {}
 
         if self.config.fp8:
-            model_kwargs["quantization_config"] = FineGrainedFP8Config()
+            # model_kwargs["quantization_config"] = FineGrainedFP8Config()
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True, llm_int8_threshold=6.0)
             logger.info("FP8 quantization enabled.")
 
         if isinstance(self.press, ObservedAttentionPress):
