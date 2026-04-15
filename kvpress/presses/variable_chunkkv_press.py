@@ -28,8 +28,9 @@ class VariableChunkKVPress(BasePress):
     """
 
     press: ScorerPress
-    threshold: float # 0.0-1.0
-    max_chunk_size: int = 40
+    threshold: float = 0.001 # 0.0-1.0
+    chunking_window_size: int = 20
+    fixed_chunk_length: int = 10
     seed_ratio: float = 0.05 # num_seeds = kv_len * ratio
 
     def __post_init__(self):
@@ -88,8 +89,9 @@ class VariableChunkKVPress(BasePress):
         for seed_idx_tensor in seed_indices:
             seed_idx = seed_idx_tensor.item()
 
-            start_idx = max(0, seed_idx - self.max_chunk_size // 2)
-            end_idx = min(kv_len, seed_idx + 1 + self.max_chunk_size // 2)
+            start_idx = max(0, seed_idx - self.chunking_window_size // 2)
+            end_idx = min(kv_len, seed_idx + 1 + self.chunking_window_size // 2)
+            
             # Get and Update start_idx
             for j in range(seed_idx - 1, start_idx - 1, -1): # 앞 토큰들 (seed_idx 미만, start_idx 이상)
                 if attentions[0, :, seed_idx, j].mean() < self.threshold:
@@ -124,35 +126,84 @@ class VariableChunkKVPress(BasePress):
         indices_bitmap = torch.zeros(kv_len, dtype=torch.bool, device=keys.device)
         budget = int(kv_len * (1 - self.compression_ratio)) # 남길 토큰 개수
 
-        sorted_chunk_scores = torch.sort(chunk_scores, descending=True, dim=-1)
+        chunk_len_sum = 0
+        for boundary in chunk_boundary:
+            chunk_len_sum += boundary[1] - boundary[0]
 
-        for chunk_idx in sorted_chunk_scores.indices[0]:
-            if(budget <= 0): break
+        if chunk_len_sum > budget: # 그리디로 선택
+            sorted_chunk_scores = torch.sort(chunk_scores, descending=True, dim=-1)
 
-            chunk_len = chunk_boundary[chunk_idx][1] - chunk_boundary[chunk_idx][0]
-            if budget < chunk_len:
-                # 청크 안에서 topk로 토큰 budget개 선택
-                _, curr_indices = global_scores[0, chunk_boundary[chunk_idx][0] : chunk_boundary[chunk_idx][1]].topk(budget, dim=-1)
-                indices_bitmap[chunk_boundary[chunk_idx][0] + curr_indices] = True # topk는 주어진 범위 안에서의 인덱스. 청크의 시작 주소를 더해줘야 함.
-                budget = 0
-                break
-            indices_bitmap[chunk_boundary[chunk_idx][0] : chunk_boundary[chunk_idx][1]] = True
-            budget -= chunk_len
-        
-       
+            for chunk_id in sorted_chunk_scores.indices[0]:
+                if budget <= 0: break
+
+                chunk_len = chunk_boundary[chunk_id][1] - chunk_boundary[chunk_id][0]
+                if budget >= chunk_len:
+                    indices_bitmap[chunk_boundary[chunk_id][0] : chunk_boundary[chunk_id][1]] = True
+                    budget -= chunk_len
+                else:
+                    # 청크 안에서 topk로 토큰 budget개 선택
+                    _, curr_indices = global_scores[0, chunk_boundary[chunk_id][0] : chunk_boundary[chunk_id][1]].topk(budget, dim=-1)
+                    indices_bitmap[chunk_boundary[chunk_id][0] + curr_indices] = True # topk는 주어진 범위 안에서의 인덱스. 청크의 시작 주소를 더해줘야 함.
+                    budget = 0
+
+
+        else: # 모든 가변길이 청크 선택
+            for boundary in chunk_boundary:
+                indices_bitmap[boundary[0]:boundary[1]] = True
+            budget -= chunk_len_sum
+            # print(f"---------")
+            # print(f"모든 가변길이 청크 선택: {budget}")
+
         # print(f"---------")
         # print(f"1. chunk_boundary: {len(chunk_boundary)}\n", chunk_boundary)
         # # print(f"2. seed_indices: {seed_indices.shape}\n ", seed_indices)
         # # print(f"3. chunk_scores: {chunk_scores.shape}\n", chunk_scores)
-        # print(f"4. remaining budget: {budget}")
+        # print(f"4. remaining budget: {budget}, chunk_len_sum: {chunk_len_sum}")
 
+        if budget > 0: # 나머지 토큰들로 budget 채우기
+            # 방법3: 선택되지 않은 토큰을 고정 길이 청크로 분할해서 topk
+            
+            fixed_chunks = [] # 아직 선택되지 않은 토큰들의 평균 점수 계산 (선택된 토큰은 제외하고 계산)
+            for i in range(kv_len // self.fixed_chunk_length):
+                start_idx = i * self.fixed_chunk_length
+                end_idx = min(kv_len, start_idx + self.fixed_chunk_length)
 
-        if budget > 0:
-            global_scores[0, indices_bitmap] = float('-inf')
-            curr_indices = global_scores[0].topk(budget, dim=-1).indices
-            indices_bitmap[curr_indices] = True
+                mask = ~indices_bitmap[start_idx:end_idx]
+                if mask.any():
+                    chunk_score = global_scores[0, start_idx:end_idx][mask].mean().item()
+                    fixed_chunks.append(chunk_score)
+            
+            # 점수 순으로 정렬 후 budget 소진 시까지 할당
+            fixed_chunks.sort(reverse=True)
+            # print(f"나머지 토큰들 채우기 - fixed_chunks: {len(fixed_chunks)}\n{fixed_chunks}")
 
-            # 뒤에서부터 아직 선택되지 않은 토큰 budget개 선택
+            for i in range(len(fixed_chunks)):
+                if budget <= 0: break
+                
+                start_idx = i * self.fixed_chunk_length
+                end_idx = min(kv_len, start_idx + self.fixed_chunk_length)
+
+                # 실제 새로 추가될 토큰들만 bitmap에 반영
+                mask = ~indices_bitmap[start_idx:end_idx]
+                actual_to_add = mask.sum().item()
+                
+                if budget >= actual_to_add:
+                    indices_bitmap[start_idx:end_idx] = True
+                    budget -= actual_to_add
+                else:
+                    # 마지막 남은 budget은 해당 고정 청크 내에서 top-k
+                    _, sub_idx = global_scores[0, start_idx:end_idx][mask].topk(budget)
+                    # 실제 인덱스 매핑 (mask가 True인 위치들 중 top-k)
+                    target_indices = torch.where(mask)[0][sub_idx]
+                    indices_bitmap[start_idx + target_indices] = True
+                    budget = 0
+
+            # # 방법2: 선택되지 않은 토큰 중 topk
+            # global_scores[0, indices_bitmap] = float('-inf')
+            # curr_indices = global_scores[0].topk(budget, dim=-1).indices
+            # indices_bitmap[curr_indices] = True
+
+            # 방법1: 뒤에서부터 아직 선택되지 않은 토큰 budget개 선택
             # curr_indices = torch.where(~indices_bitmap)[0][-budget:]
             # indices_bitmap[curr_indices] = True
 
@@ -162,28 +213,30 @@ class VariableChunkKVPress(BasePress):
         # print(f"4. indices: {indices.shape}\n", indices)
         # print(f"5. indices_bitmap: {indices_bitmap.shape}\n", indices_bitmap)
         # print(f"6. attentions: {attentions.shape}\n")
+        # print(f"7. budget: {budg et}")
 
         # 5. Use gather to collect selected keys and values
         keys = keys.gather(2, indices).contiguous()
         values = values.gather(2, indices).contiguous()
 
-        layer_idx = getattr(module, "layer_idx", "unknown")
-        unique_seeds = []
-        for s in seed_indices:
-            s_val = s.item()
-            if all(abs(s_val - existing) > 100 for existing in unique_seeds):
-                unique_seeds.append(s_val)
-            if len(unique_seeds) >= 5: # 대표 시드 5개만 확보
-                break
-        unique_seeds.sort()
-        if layer_idx in [2, 14, 25]: # 첫 번째, 중간, 마지막 레이어 샘플링
-            self._visualize_attention_distribution(attentions, unique_seeds, layer_idx, kv_len)
+        # # 중심토큰 주변 attention 그래프 출력
+        # layer_idx = getattr(module, "layer_idx", "unknown")
+        # unique_seeds = []
+        # for s in seed_indices:
+        #     s_val = s.item()
+        #     if all(abs(s_val - existing) > 100 for existing in unique_seeds):
+        #         unique_seeds.append(s_val)
+        #     if len(unique_seeds) >= 5: # 대표 시드 5개만 확보
+        #         break
+        # unique_seeds.sort()
+        # if layer_idx in [2, 14, 25]: # 첫 번째, 중간, 마지막 레이어 샘플링
+        #     self._visualize_attention_distribution(attentions, unique_seeds, layer_idx, kv_len)
 
         return keys, values
     
     def _visualize_attention_distribution(self, attentions, unique_seeds, layer_idx, kv_len):
         # 1. 특정 Seed 하나를 골라 주변 어텐션 분포 확인 (Decay 관찰)
-        window_size = 100 # max_chunk_size보다 넓게 설정
+        window_size = 100 # chunking_window_size보다 넓게 설정
         plt.figure(figsize=(10, 6))
         
         for i, target_seed in enumerate(unique_seeds):

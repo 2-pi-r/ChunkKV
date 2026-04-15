@@ -313,6 +313,11 @@ class EvaluationRunner:
         logger.info(f"Loading dataset: {DATASET_REGISTRY[dataset_name]} (data_dir: {data_dir})")
         df = load_dataset(DATASET_REGISTRY[dataset_name], data_dir=data_dir, split="test").to_pandas()
 
+        if self.config.max_context_length is not None: # 토크나이저로 길이 보고 max 안 넘는 것들 중에서만 후보 뽑음 
+            df["context_len"] = df["context"].apply(lambda x: len(self.pipeline.tokenizer.encode(x)))
+            df = df[df["context_len"] <= self.config.max_context_length]
+            logger.info(f"Found {len(df)} candidates within max_context_length ({self.config.max_context_length}).")
+
         if fraction < 1.0:
             original_len = len(df)
             df = df.sample(frac=fraction, random_state=self.config.seed)
