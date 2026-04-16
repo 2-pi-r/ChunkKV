@@ -313,11 +313,6 @@ class EvaluationRunner:
         logger.info(f"Loading dataset: {DATASET_REGISTRY[dataset_name]} (data_dir: {data_dir})")
         df = load_dataset(DATASET_REGISTRY[dataset_name], data_dir=data_dir, split="test").to_pandas()
 
-        if self.config.max_context_length is not None: # 토크나이저로 길이 보고 max 안 넘는 것들 중에서만 후보 뽑음 
-            df["context_len"] = df["context"].apply(lambda x: len(self.pipeline.tokenizer.encode(x)))
-            df = df[df["context_len"] <= self.config.max_context_length]
-            logger.info(f"Found {len(df)} candidates within max_context_length ({self.config.max_context_length}).")
-
         if fraction < 1.0:
             original_len = len(df)
             df = df.sample(frac=fraction, random_state=self.config.seed)
@@ -405,6 +400,7 @@ class EvaluationRunner:
             for index, row in tqdm(self.df.iterrows(), total=len(self.df), desc="Running Inference"):
                 context = row["context"]
                 question = row["question"]
+                print()
                 answer_prefix = row["answer_prefix"]
                 max_new_tokens = self.config.max_new_tokens or row["max_new_tokens"]
                 output = self.pipeline(
@@ -432,6 +428,12 @@ class EvaluationRunner:
                 # Use max_new_tokens from config, or fallback to dataset's default for the task
                 max_new_tokens = self.config.max_new_tokens or df_group["max_new_tokens"].iloc[0]
                 answer_prefix = df_group["answer_prefix"].iloc[0]
+
+                # context len 출력 (OOM 나는 길이 확인용)
+                context_len = len(self.pipeline.tokenizer.encode(context))
+                max_question_len = max([len(self.pipeline.tokenizer.encode(q)) for q in questions])
+                prefix_len = len(self.pipeline.tokenizer.encode(answer_prefix))
+                logger.info(f"[Length] Total: {context_len + max_question_len + prefix_len} = {context_len} + {max_question_len} + {prefix_len}")
 
                 output = self.pipeline(  # type: ignore[misc]
                     context,
