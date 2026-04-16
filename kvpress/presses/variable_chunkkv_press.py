@@ -6,13 +6,17 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 import numpy as np
+import math
+
+from transformers.models.llama.modeling_llama import repeat_kv, rotate_half
+from kvpress.utils import get_prerope_query_states
 
 from kvpress.presses.base_press import BasePress
 from kvpress.presses.scorer_press import ScorerPress
 from kvpress.presses.snapkv_press import SnapKVPress
 
-import matplotlib.pyplot as plt
-import os
+# import matplotlib.pyplot as plt
+# import os
 
 @dataclass
 class VariableChunkKVPress(BasePress):
@@ -34,7 +38,7 @@ class VariableChunkKVPress(BasePress):
     seed_ratio: float = 0.05 # num_seeds = kv_len * ratio
 
     def __post_init__(self):
-        assert isinstance(self.press, ScorerPress), "ChunkKVPress requires a ScorerPress as input"
+        assert isinstance(self.press, ScorerPress), "VariableChunkKVPress requires a ScorerPress as input"
 
     def post_init_from_model(self, model):
         self.press.post_init_from_model(model)
@@ -46,6 +50,92 @@ class VariableChunkKVPress(BasePress):
     @compression_ratio.setter
     def compression_ratio(self, value):
         self.press.compression_ratio = value
+    
+    @staticmethod
+    def compute_seeds_attention(module, hidden_states, keys, chunking_window_size, seed_indices, position_embeddings):
+        """
+        seed_indices를 받아서, 예를 들어 window=20이라면 q는 [s, s+10], k는 [s-10, s+10] 범위로 attention weights 계산.
+        """
+        bsz, _, k_len, _ = keys.shape
+        num_heads = module.config.num_attention_heads
+        head_dim = module.head_dim
+        num_key_value_groups = num_heads // module.config.num_key_value_heads
+        
+        num_seeds = seed_indices.shape[0]
+
+        half_win = chunking_window_size // 2
+        q_win_len = 1 + half_win # [s, s+half_win]
+        k_win_len = 1 + chunking_window_size # [s-half_win, s+half_win]
+
+        # 1. Prepare Full States
+        query_states_raw = get_prerope_query_states(module, hidden_states)
+        cos, sin = position_embeddings
+        key_states = repeat_kv(keys, num_key_value_groups)
+
+        # 2. Generate Relative Indices for Gathering
+        q_offsets = torch.arange(0, q_win_len, device=seed_indices.device) # [0, 1, ..., half_win]
+        k_offsets = torch.arange(-half_win, half_win + 1, device=seed_indices.device) # [-half_win, ..., half_win]
+
+        # absolute indices: (num_seeds, win_len)
+        q_idx = (seed_indices.unsqueeze(1) + q_offsets).clamp(0, k_len - 1) # q_idx: (num_seeds, q_win_len) # seed_indices: (num_seeds,) -> (num_seeds, 1) # q_offsets: (q_win_len,)
+        k_idx = (seed_indices.unsqueeze(1) + k_offsets).clamp(0, k_len - 1)
+
+        # 3. Gather States
+        # (bsz, num_heads, k_len, head_dim) -> (bsz, num_heads, num_seeds, win_len, head_dim)
+        def gather_states(states, idx):
+            # Index expansion for gather
+            idx = idx.view(1, 1, num_seeds, -1, 1).expand(bsz, num_heads, -1, -1, head_dim)
+            return torch.gather(states.unsqueeze(2).expand(-1, -1, num_seeds, -1, -1), 3, idx)
+
+        q_sliced = gather_states(query_states_raw, q_idx) # (bsz, num_heads, num_seeds, q_win, head_dim)
+        k_sliced = gather_states(key_states, k_idx) # (bsz, num_heads, num_seeds, k_win, head_dim)
+
+        # Apply RoPE to query
+        cos_sliced = gather_states(cos.expand(bsz, num_heads, -1, -1), q_idx) # # cos, sin: (1, 1, seq_len, head_dim) -> (bsz, num_heads, num_seeds, q_win, head_dim)
+        sin_sliced = gather_states(sin.expand(bsz, num_heads, -1, -1), q_idx)
+        q_sliced = (q_sliced * cos_sliced) + (rotate_half(q_sliced) * sin_sliced)
+
+        # attn_weights
+        attn_weights = torch.matmul(q_sliced, k_sliced.transpose(-1, -2)) / math.sqrt(head_dim) # (bsz, num_heads, num_seeds, q_win, k_win)
+
+        mask = q_idx.unsqueeze(-1) < k_idx.unsqueeze(-2) # Q의 절대 위치와 K의 절대 위치를 비교하여 mask 생성 # mask: (num_seeds, q_win, k_win)  # q_idx: (num_seeds, q_win)
+        attn_weights = attn_weights.masked_fill(mask.view(1, 1, num_seeds, q_win_len, k_win_len), float("-inf"))
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q_sliced.dtype)
+
+        return attn_weights # (bsz, num_heads, num_seeds, q_win, k_win)
+        
+        # 병렬연산 적용 전
+        all_key_states = repeat_kv(keys, num_key_value_groups) # (bsz, num_heads, k_len, head_dim)
+        cos, sin = position_embeddings
+
+        all_attn_weights = []
+        for seed in seed_indices:
+            # Define ranges
+            q_start = seed.item()
+            q_end = min(seed.item() + 1 + self.chunking_window_size // 2, k_len)
+            
+            k_start = max(seed.item() - self.chunking_window_size // 2, 0)
+            k_end = q_end
+
+            # Get query_states (Apply RoPE)
+            query_states = get_prerope_query_states(module, hidden_states[:, q_start:q_end])
+            query_states = (query_states * cos.unsqueeze(1)) + (rotate_half(query_states) * sin.unsqueeze(1))
+            # Get key_states
+            key_states = all_key_states[:, :, k_start:k_end, :]
+
+            # Compute attention # (bsz, num_heads, q_seg_len, k_seg_len)
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(head_dim) 
+            attention_mask = torch.ones_like(attn_weights) * float("-inf")
+            attention_mask = torch.triu(attention_mask, diagonal= seed.item() - k_start + 1)
+            attn_weights += attention_mask
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            
+            all_attn_weights.append(attn_weights)
+
+        # all_attn_weights는 각 seed별로 (bsz, num_heads, q_win, k_win) 크기의 리스트임
+        return all_attn_weights
+    
 
     def compress(
         self,
@@ -60,7 +150,7 @@ class VariableChunkKVPress(BasePress):
         if self.press.compression_ratio == 0:
             return keys, values
 
-        assert attentions is not None, "VariableChunkKV needs attentions."
+        # assert attentions is not None, "VariableChunkKV needs attentions."
         
         kv_len = keys.shape[2]
         bsz = keys.shape[0]
@@ -83,25 +173,41 @@ class VariableChunkKVPress(BasePress):
         seed_indices = top_tokens.indices[0] #.sort()[0]
 
         # attentions : torch.Tensor: Attention weights from the layer with shape (batch_size, num_heads, seq_len, seq_len) # weight니까 정규화된 거겠지?
+        seed_attentions = self.compute_seeds_attention(
+            module, hidden_states, keys, self.chunking_window_size, seed_indices, kwargs["position_embeddings"]
+        ) # (bsz, num_heads, num_seeds, q_win, k_win)
+        
         chunk_boundary = [] # 2차원 list of [start_idx, end_idx]
         raw_chunk_boundary = []
 
-        for seed_idx_tensor in seed_indices:
-            seed_idx = seed_idx_tensor.item()
+        half_win = self.chunking_window_size // 2
 
-            start_idx = max(0, seed_idx - self.chunking_window_size // 2)
-            end_idx = min(kv_len, seed_idx + 1 + self.chunking_window_size // 2)
+        for i in range(seed_indices.shape[0]):
+            seed_idx = seed_indices[i].item()
+
+            start_idx = max(0, seed_idx - half_win)
+            end_idx = min(kv_len, seed_idx + 1 + half_win)
             
             # Get and Update start_idx
             for j in range(seed_idx - 1, start_idx - 1, -1): # 앞 토큰들 (seed_idx 미만, start_idx 이상)
-                if attentions[0, :, seed_idx, j].mean() < self.threshold:
+                if seed_attentions[0, :, i, 0, j - start_idx].mean() < self.threshold:
                     start_idx = j + 1 # threshold 못 넘기 직전까지 청킹
                     break
             # Get and Update end_idx
             for j in range(seed_idx + 1, end_idx): # 뒤 토큰들
-                if attentions[0, :, j, seed_idx].mean() < self.threshold:
+                if seed_attentions[0, :, i, j - seed_idx, half_win].mean() < self.threshold:
                     end_idx = j # threshold 못 넘기 직전까지 청킹
                     break
+            # # Get and Update start_idx
+            # for j in range(seed_idx - 1, start_idx - 1, -1): # 앞 토큰들 (seed_idx 미만, start_idx 이상)
+            #     if attentions[0, :, seed_idx, j].mean() < self.threshold:
+            #         start_idx = j + 1 # threshold 못 넘기 직전까지 청킹
+            #         break
+            # # Get and Update end_idx
+            # for j in range(seed_idx + 1, end_idx): # 뒤 토큰들
+            #     if attentions[0, :, j, seed_idx].mean() < self.threshold:
+            #         end_idx = j # threshold 못 넘기 직전까지 청킹
+            #         break
             
             raw_chunk_boundary.append([start_idx, end_idx])
         

@@ -219,7 +219,7 @@ class KVPressTextGenerationPipeline(Pipeline):
                 self.model.model(
                     input_ids=context_ids,
                     past_key_values=cache,
-                    output_attentions=True #if isinstance(press, VariableChunkKVPress) else False, # [추가] Attention Matrix를 계산하도록 설정
+                    # output_attentions=True #if isinstance(press, VariableChunkKVPress) else False, # [추가] Attention Matrix를 계산하도록 설정
                 )
 
             logger.debug(f"Context Length: {context_length}")
