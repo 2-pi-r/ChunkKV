@@ -41,6 +41,7 @@ from kvpress import (
     ThinKPress,
     TOVAPress,
     VariableChunkKVPress,
+    SemanticChunkKVPress,
 )
 
 # These dictionaries define the available datasets, scorers, and KVPress methods for evaluation.
@@ -107,6 +108,7 @@ PRESS_REGISTRY = {
     "compactor": CompactorPress(),
     "adakv_compactor": AdaKVPress(CompactorPress()),
     "variable_chunkkv": VariableChunkKVPress(press=SnapKVPress()),
+    "semantic_chunkkv": SemanticChunkKVPress(press=SnapKVPress()),
     "no_press": None,
     "decoding_knorm": DecodingPress(base_press=KnormPress()),
     "decoding_streaming_llm": DecodingPress(base_press=StreamingLLMPress()),
