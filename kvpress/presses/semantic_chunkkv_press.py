@@ -37,13 +37,27 @@ class SemanticChunkKVPress(BasePress):
 
     def post_init_from_model(self, model):
         self.press.post_init_from_model(model)
-        # Tokenizer를 사용하여 delimiter characters를 token IDs로 변환
+        
         tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path)
         ids = []
+
         for d in self.delimiter_set:
             token_id = tokenizer.encode(d, add_special_tokens=False)
             if token_id:
                 ids.append(token_id[-1])
+        self.delimiter_ids = torch.tensor(list(set(ids)), device=model.device)
+        
+        # # 전체 단어집(vocab)을 순회하며 검사
+        # for token, token_id in tokenizer.get_vocab().items():
+        #     # SentencePiece의 경우 공백이 ' ' (Llama 등) 혹은 ' ' 등으로 표현됨
+        #     # 이를 일반 공백으로 치환해서 검사하거나, 단순 포함 여부를 확인
+        #     decoded_token = tokenizer.convert_tokens_to_string([token])
+            
+        #     # 구분자 세트 중 하나라도 토큰에 포함되어 있는지 확인
+        #     # (단순 포함이 너무 많으면 .strip() 등을 사용해 경계 조건 정교화 가능)
+        #     if any(decoded_token.endswith(d) for d in self.delimiter_set):
+        #         ids.append(token_id)
+                
         self.delimiter_ids = torch.tensor(list(set(ids)), device=model.device)
 
     @property
