@@ -118,12 +118,12 @@ class SemanticChunkKVPress(BasePress):
         chunk_lengths = torch.bincount(chunk_ids)[chunk_indices] # (num_chunks,) # chunk_indices 순서대로 bincount 결과를 재배치
         cumulative_lengths = torch.cumsum(chunk_lengths, dim=0)  # (num_chunks,)
         
-        print(f"------")
-        print(f"Chunk {len(chunk_lengths)}개", end="\t")
-        print(f"길이: Mean - {chunk_lengths.float().mean().item():.2f}", end=", ")
-        print(f"Max - {chunk_lengths.max().item()}", end=", ")
-        print(f"Min - {chunk_lengths.min().item()}")
-        print(f"\b\t앞 10개 길이: {chunk_lengths[:10].tolist()}")
+        # print(f"------")
+        # print(f"Chunk {len(chunk_lengths)}개", end="\t")
+        # print(f"길이: Mean - {chunk_lengths.float().mean().item():.2f}", end=", ")
+        # print(f"Max - {chunk_lengths.max().item()}", end=", ")
+        # print(f"Min - {chunk_lengths.min().item()}")
+        # print(f"\b\t앞 10개 길이: {chunk_lengths[:10].tolist()}")
 
         num_complete_chunks = torch.searchsorted(cumulative_lengths, budget).item() # int
         remaining_budget = budget if num_complete_chunks == 0 else budget - cumulative_lengths[num_complete_chunks - 1].item() # int
