@@ -21,14 +21,7 @@ from kvpress.presses.snapkv_press import SnapKVPress
 @dataclass
 class VariableChunkKVPress(BasePress):
     """
-    ChunkKV 개선 연구
-    (설명 나중에 추가)
-
-    Parameters
-    ----------
-    press : ScorerPress
-        The underlying scoring method used to compute global importance scores.
-    (설명 나중에 추가)
+    ChunkKV 개선 연구 (v1)
     """
 
     press: ScorerPress

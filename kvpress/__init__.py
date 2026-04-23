@@ -42,6 +42,7 @@ from kvpress.presses.think_press import ThinKPress
 from kvpress.presses.tova_press import TOVAPress
 from kvpress.presses.variable_chunkkv_press import VariableChunkKVPress
 from kvpress.presses.semantic_chunkkv_press import SemanticChunkKVPress
+from kvpress.presses.variable_chunkkv3_press import VariableChunkKVPress3
 
 # Patch the attention functions to support head-wise compression
 patch_attention_functions()
