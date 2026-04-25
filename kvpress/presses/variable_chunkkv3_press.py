@@ -75,7 +75,7 @@ class VariableChunkKVPress3(BasePress):
             attentions,
             kwargs,
         )
-        global_scores = global_scores.sum(dim=1) # head 차원으로 sum  # (batch_size, seq_len)
+        
 
 
         # 2. Divide sequence into chunks
@@ -125,7 +125,8 @@ class VariableChunkKVPress3(BasePress):
 
 
         # 3. Calculate chunk_scores from scores
-        chunk_ids = torch.zeros_like(global_scores[0]).scatter_(0, final_boundaries, 1).cumsum(dim=0).long() # (kv_len)
+        chunk_ids = torch.zeros(kv_len, device=keys.device, dtype=torch.long)
+        chunk_ids = chunk_ids.scatter_(0, final_boundaries, 1).cumsum(dim=0).long() # (kv_len)
         num_chunks = chunk_ids[-1].item() + 1
 
         chunk_scores = torch.zeros(num_chunks, device=keys.device, dtype=global_scores.dtype) # (num_chunks,)

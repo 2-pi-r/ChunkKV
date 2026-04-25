@@ -312,6 +312,13 @@ class EvaluationRunner:
 
         logger.info(f"Loading dataset: {DATASET_REGISTRY[dataset_name]} (data_dir: {data_dir})")
         df = load_dataset(DATASET_REGISTRY[dataset_name], data_dir=data_dir, split="test").to_pandas()
+        # df = load_dataset('THUDM/LongBench', "qasper", split='test', trust_remote_code=True).to_pandas()
+        # if "answer_prefix" not in df.columns:
+        #     df["answer_prefix"] = "Answer:"
+        # if "max_new_tokens" not in df.columns:
+        #     df["max_new_tokens"] = self.config.max_new_tokens or 148 # qasper
+        # if "task" not in df.columns:
+        #     df["task"] = self.config.data_dir
 
         if fraction < 1.0:
             original_len = len(df)
@@ -338,8 +345,14 @@ class EvaluationRunner:
 
         if self.config.query_aware:
             logger.info("Query-aware compression: including question in context for compression.")
-            df["context"] = df["context"] + df["question"]  # type: ignore[index]
+
+            df['context'] = df['context'] + df['question']
+            # prefix = 'You are given a scientific article and a question. Answer the question as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write "unanswerable". If the question is a yes/no question, answer "yes", "no", or "unanswerable". Do not provide any explanation.\n\nArticle: '
+            # suffix = '\n\n Answer the question based on the above article as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write "unanswerable". If the question is a yes/no question, answer "yes", "no", or "unanswerable". Do not provide any explanation.\n\n'
+            # df['context'] = prefix + df['context'] + suffix + 'Question: ' + df['input'] + '\n\n'
+
             df["question"] = ""  # type: ignore[index]
+            # df["question"] = ""  # type: ignore[index]
 
         self.df = df
         logger.info(f"Dataset processed with {len(self.df)} entries.")
@@ -400,6 +413,7 @@ class EvaluationRunner:
             for index, row in tqdm(self.df.iterrows(), total=len(self.df), desc="Running Inference"):
                 context = row["context"]
                 question = row["question"]
+                # question = row["input"]
                 print()
                 answer_prefix = row["answer_prefix"]
                 max_new_tokens = self.config.max_new_tokens or row["max_new_tokens"]
@@ -425,10 +439,12 @@ class EvaluationRunner:
                 df_context_grouped, total=self.df["context"].nunique(), desc="Running Inference"
             ):  # type: ignore[union-attr]
                 questions = df_group["question"].to_list()
+                # questions = df_group["input"].to_list()
                 # Use max_new_tokens from config, or fallback to dataset's default for the task
                 max_new_tokens = self.config.max_new_tokens or df_group["max_new_tokens"].iloc[0]
                 answer_prefix = df_group["answer_prefix"].iloc[0]
 
+                # print("df[context] : ", context)
                 # context len 출력 (OOM 나는 길이 확인용)
                 context_len = len(self.pipeline.tokenizer.encode(context))
                 max_question_len = max([len(self.pipeline.tokenizer.encode(q)) for q in questions])
