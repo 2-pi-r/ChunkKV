@@ -106,21 +106,25 @@ class ChunkKVPress(BasePress):
         top_chunks = chunk_scores.topk(n_chunks_kept, dim=-1)
 
         # 4. Create indices for selected chunks
-        indices = []
-        for chunk_idx in top_chunks.indices[0]:
-            # if chunk_idx < num_complete_chunks:
-            #     # For complete chunks
-            #     start_idx = chunk_idx * self.chunk_length
-            #     chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
-            # else:
-            #     # For the remaining partial chunk
-            #     chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
+        # indices = []
+        # for chunk_idx in top_chunks.indices[0]:
+        #     # if chunk_idx < num_complete_chunks:
+        #     #     # For complete chunks
+        #     #     start_idx = chunk_idx * self.chunk_length
+        #     #     chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
+        #     # else:
+        #     #     # For the remaining partial chunk
+        #     #     chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
             
-            # For complete chunks
-            start_idx = chunk_idx * self.chunk_length
-            chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
+        #     # For complete chunks
+        #     start_idx = chunk_idx * self.chunk_length
+        #     chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
 
-            indices.append(chunk_indices)
+        #     indices.append(chunk_indices)
+        # CHANGED: Python loop + 반복 torch.arange → 벡터 연산으로 대체
+        chunk_starts = top_chunks.indices[0].sort()[0] * self.chunk_length  # (n_chunks_kept,)
+        chunk_indices = (chunk_starts.unsqueeze(1) + torch.arange(self.chunk_length, device=keys.device).unsqueeze(0)).reshape(-1)  # (n_chunks_kept * chunk_length,)
+        indices = [chunk_indices]
         
         # For the remaining partial chunk
         chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
