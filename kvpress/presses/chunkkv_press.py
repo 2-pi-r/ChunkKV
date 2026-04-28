@@ -60,8 +60,8 @@ class ChunkKVPress(BasePress):
 
         if self.press.compression_ratio == 0:
             return keys, values
-        
-        assert attentions is None, "ChunkPress does not support attentions." # 실험을 위해 주석처리
+
+        assert attentions is None, "ChunkPress does not support attentions."
 
         kv_len = keys.shape[2]
 
@@ -92,43 +92,54 @@ class ChunkKVPress(BasePress):
             main_chunk_scores = torch.empty((global_scores.shape[0], 0), device=global_scores.device)
 
         # Handle remaining tokens if any
-        # if remaining_tokens > 0:
-        #     remaining_scores = global_scores[..., -remaining_tokens:]
-        #     remaining_chunk_score = remaining_scores.sum(dim=1).mean(dim=-1, keepdim=True)
-        #     chunk_scores = torch.cat([main_chunk_scores, remaining_chunk_score], dim=-1)
-        # else:
-            # chunk_scores = main_chunk_scores
-        chunk_scores = main_chunk_scores # only for complete chunks; remaining tokens are preserved always
+        if remaining_tokens > 0:
+            remaining_scores = global_scores[..., -remaining_tokens:]
+            remaining_chunk_score = remaining_scores.sum(dim=1).mean(dim=-1, keepdim=True)
+            chunk_scores = torch.cat([main_chunk_scores, remaining_chunk_score], dim=-1)
+        else:
+            chunk_scores = main_chunk_scores
 
         # 3. Calculate number of chunks to keep
-        # n_chunks_kept = max(1, int((num_complete_chunks + (remaining_tokens > 0)) * (1 - self.press.compression_ratio)))
-        n_chunks_kept = max(1, int((num_complete_chunks) * (1 - self.press.compression_ratio)))
+        n_chunks_kept = max(1, int((num_complete_chunks + (remaining_tokens > 0)) * (1 - self.press.compression_ratio) + 1e-9))
         top_chunks = chunk_scores.topk(n_chunks_kept, dim=-1)
 
         # 4. Create indices for selected chunks
-        # indices = []
-        # for chunk_idx in top_chunks.indices[0]:
-        #     # if chunk_idx < num_complete_chunks:
-        #     #     # For complete chunks
-        #     #     start_idx = chunk_idx * self.chunk_length
-        #     #     chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
-        #     # else:
-        #     #     # For the remaining partial chunk
-        #     #     chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
-            
-        #     # For complete chunks
-        #     start_idx = chunk_idx * self.chunk_length
-        #     chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
+        indices = []
+        for chunk_idx in top_chunks.indices[0]:
+            if chunk_idx < num_complete_chunks:
+                # For complete chunks
+                start_idx = chunk_idx * self.chunk_length
+                chunk_indices = torch.arange(start_idx, start_idx + self.chunk_length, device=keys.device)
+            else:
+                # For the remaining partial chunk
+                chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
+            indices.append(chunk_indices)
 
-        #     indices.append(chunk_indices)
-        # CHANGED: Python loop + 반복 torch.arange → 벡터 연산으로 대체
-        chunk_starts = top_chunks.indices[0].sort()[0] * self.chunk_length  # (n_chunks_kept,)
-        chunk_indices = (chunk_starts.unsqueeze(1) + torch.arange(self.chunk_length, device=keys.device).unsqueeze(0)).reshape(-1)  # (n_chunks_kept * chunk_length,)
-        indices = [chunk_indices]
-        
-        # For the remaining partial chunk
-        chunk_indices = torch.arange(num_complete_chunks * self.chunk_length, kv_len, device=keys.device)
-        indices.append(chunk_indices)
+        # 테스트
+        # if remaining_tokens > 0:
+        #     remaining_budget = self.chunk_length - remaining_tokens
+        #     chunk_scores, chunk_indices = torch.sort(chunk_scores, descending=True)
+        #     next_chunk_idx = chunk_indices[0][n_chunks_kept]
+        #     start = next_chunk_idx * self.chunk_length
+            
+            # topk뽑기
+            # token_indices = torch.arange(start, start + self.chunk_length, device=keys.device)
+            # token_scores = global_scores[0, :, token_indices].mean(dim=0)
+            # _, relative_idx = token_scores.topk(remaining_budget)
+            # extra_indices = token_indices[relative_idx]
+            # indices.append(extra_indices)
+            
+            # 앞에서부터
+            # token_indices = torch.arange(start, start + remaining_budget, device=keys.device)
+            # indices.append(token_indices)
+
+            # 뒤에서부터
+            # end = start + remaining_budget
+            # token_indices = torch.arange(end - remaining_budget, end, device=keys.device)
+            # indices.append(token_indices)
+
+
+
 
         indices = torch.cat(indices).sort()[0]
         indices = indices.view(1, 1, -1, 1).expand(keys.shape[0], keys.shape[1], -1, module.head_dim)
