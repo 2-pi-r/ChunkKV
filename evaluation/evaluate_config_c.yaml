@@ -8,8 +8,8 @@ dataset: "longbench"                                  # see DATASET_REGISTRY in 
 
 data_dir: "qasper" # "gov_report"                                  # Subdirectory of the dataset (if applicable) else leave "null"
 
-press_name: "chunkkv" # "snapkv"                               # see PRESS_REGISTRY in evaluate_registry.py
-compression_ratio: 0.8                            # Compression ratio for the press (0.0 to 1.0)
+press_name: "chunkkv" # "variable_chunkkv3" # "chunkkv" # "snapkv"                               # see PRESS_REGISTRY in evaluate_registry.py
+compression_ratio: 0.9                            # Compression ratio for the press (0.0 to 1.0)
 key_channel_compression_ratio: null               # For ThinKPress and ComposedPress (0.0 to 1.0)
 threshold: null                                   # For DMSPress
 

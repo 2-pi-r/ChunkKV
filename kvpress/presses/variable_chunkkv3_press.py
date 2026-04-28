@@ -26,7 +26,7 @@ class VariableChunkKVPress3(BasePress):
     """
 
     press: ScorerPress
-    chunking_window: int = 3 # 고정 경계를 기준으로 ±3 토큰을 봄.
+    chunking_window: int = 5 # 고정 경계를 기준으로 ± window 토큰을 봄.
     chunk_length: int = 10 # 고정 경계 
 
     def __post_init__(self):
@@ -159,7 +159,7 @@ class VariableChunkKVPress3(BasePress):
     
         chunk_lengths = torch.bincount(chunk_ids)[chunk_indices] # (num_chunks,) # chunk_indices 순서대로 bincount 결과를 재배치
         cumulative_lengths = torch.cumsum(chunk_lengths, dim=0)  # (num_chunks,)
-        num_complete_chunks = torch.searchsorted(cumulative_lengths, budget).item() # int
+        num_complete_chunks = torch.searchsorted(cumulative_lengths, budget, right=True).item() # int
         remaining_budget = budget if num_complete_chunks == 0 else budget - cumulative_lengths[num_complete_chunks - 1].item() # int
 
         # indices에 반영하기

@@ -77,7 +77,7 @@ SCORER_REGISTRY = {
 PRESS_REGISTRY = {
     "adakv_snapkv": AdaKVPress(SnapKVPress()),
     "block_keydiff": BlockPress(press=KeyDiffPress(), block_size=128),
-    "chunkkv": ChunkKVPress(press=SnapKVPress(), chunk_length=20),
+    "chunkkv": ChunkKVPress(press=SnapKVPress(), chunk_length=10),
     "critical_adakv_expected_attention": CriticalAdaKVPress(ExpectedAttentionPress(use_vnorm=False)),
     "critical_adakv_snapkv": CriticalAdaKVPress(SnapKVPress()),
     "critical_expected_attention": CriticalKVPress(ExpectedAttentionPress(use_vnorm=False)),
