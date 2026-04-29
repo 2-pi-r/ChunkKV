@@ -130,12 +130,15 @@ class VariableChunkKVPress3(BasePress):
         # 2. 유효한 경계 후보인지 판단하는 마스크 생성
         # 조건: ' ' (U+2581)로 시작하거나, 알파벳/숫자가 아닌 특수문자/구두점인 경우
         valid_mask = torch.tensor(
-            [(t.startswith(' ') or not t.replace(' ', '').isalnum()) for t in cand_tokens],
+            # [(t.startswith(' ') or not t.replace(' ', '').isalnum()) for t in cand_tokens],
+            [(t[0].isspace() or t.startswith('\u2581') or not t.isalnum()) for t in cand_tokens],
             device=similarity.device, dtype=torch.bool
         ).view(num_boundaries, window_width)
 
+        
         # 3. 단어 중간 파편(valid_mask가 False인 곳)에 아주 큰 페널티 부여
         # float('inf')를 쓰면 모든 후보가 무효할 때 에러가 날 수 있으므로 충분히 큰 값 사용
+        raw_similarity = similarity.detach().clone() # 원본 유사도 보관 (로그용)
         similarity.masked_fill_(~valid_mask, 1e9)
         # -----------------------------------------------
 
@@ -148,7 +151,7 @@ class VariableChunkKVPress3(BasePress):
         for i, b_idx in enumerate(final_boundaries):
             idx = b_idx.item()
             min_score = similarity[i, best_offsets[i]].item()
-            avg_win_score = similarity[i].mean().item()
+            avg_win_score = raw_similarity[i].mean().item()
             
             # 토큰 텍스트 추출 (tokenizer가 전역 변수나 self에 있다고 가정)
             token_id = self.input_ids[0, idx].item()

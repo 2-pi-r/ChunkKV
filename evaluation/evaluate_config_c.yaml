@@ -6,10 +6,10 @@ output_dir: "../../evaluation_results" # "./results"
 model: "meta-llama/Meta-Llama-3-8B-Instruct" #"Qwen/Qwen2-7B-Instruct" #"meta-llama/Meta-Llama-3.1-8B-Instruct"
 dataset: "longbench"                                  # see DATASET_REGISTRY in evaluate_registry.py
 
-data_dir: "gov_report" # "qasper"                                  # Subdirectory of the dataset (if applicable) else leave "null"
+data_dir: "qasper" # "gov_report" #                                   # Subdirectory of the dataset (if applicable) else leave "null"
 
-press_name: "chunkkv" # "variable_chunkkv3" # "chunkkv" # "snapkv"                               # see PRESS_REGISTRY in evaluate_registry.py
-compression_ratio: 0.9                            # Compression ratio for the press (0.0 to 1.0)
+press_name: "variable_chunkkv3" # "variable_chunkkv3" # "chunkkv" # "snapkv"                               # see PRESS_REGISTRY in evaluate_registry.py
+compression_ratio: 0.7                            # Compression ratio for the press (0.0 to 1.0)
 key_channel_compression_ratio: null               # For ThinKPress and ComposedPress (0.0 to 1.0)
 threshold: null                                   # For DMSPress
 
