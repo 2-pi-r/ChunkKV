@@ -32,7 +32,7 @@ class ChunkKVPress(BasePress):
     """
 
     press: ScorerPress
-    chunk_length: int = 20
+    chunk_length: int = 10
 
     def __post_init__(self):
         assert isinstance(self.press, ScorerPress), "ChunkKVPress requires a ScorerPress as input"

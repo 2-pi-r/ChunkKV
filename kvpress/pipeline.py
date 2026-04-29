@@ -18,6 +18,7 @@ from kvpress.presses.finch_press import FinchPress
 from kvpress.presses.key_rerotation_press import KeyRerotationPress
 from kvpress.presses.prefill_decoding_press import PrefillDecodingPress
 from kvpress.presses.semantic_chunkkv_press import SemanticChunkKVPress
+from kvpress.presses.variable_chunkkv3_press import VariableChunkKVPress3
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +217,8 @@ class KVPressTextGenerationPipeline(Pipeline):
         with press(self.model) if perform_prefill_compression else contextlib.nullcontext():
             if isinstance(press, SemanticChunkKVPress):
                 press.current_context_ids = context_ids
+            if isinstance(press, VariableChunkKVPress3):
+                press.input_ids = context_ids
 
             # We run the model without the lm head for pre-filling.
             with torch.no_grad(): # [추가] 메모리 사용량 줄이도록

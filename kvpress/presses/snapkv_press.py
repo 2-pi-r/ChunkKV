@@ -35,7 +35,7 @@ class SnapKVPress(ScorerPress):
     """
 
     compression_ratio: float = 0.0
-    window_size: int = 64
+    window_size: int = 32
     kernel_size: int = 5
     # captured_scores = [] # score 분포 관찰용
 

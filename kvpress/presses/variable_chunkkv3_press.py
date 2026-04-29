@@ -16,6 +16,8 @@ from kvpress.presses.base_press import BasePress
 from kvpress.presses.scorer_press import ScorerPress
 from kvpress.presses.snapkv_press import SnapKVPress
 
+from transformers import AutoTokenizer # 관찰: 경계 토큰 출력
+
 # import matplotlib.pyplot as plt
 # import os
 
@@ -34,6 +36,8 @@ class VariableChunkKVPress3(BasePress):
 
     def post_init_from_model(self, model):
         self.press.post_init_from_model(model)
+        self.tokenizer = AutoTokenizer.from_pretrained(model.config._name_or_path) # 관찰: 경계 토큰 출력
+
 
     @property
     def compression_ratio(self):
@@ -82,7 +86,6 @@ class VariableChunkKVPress3(BasePress):
 
         # 2. Divide sequence into chunks
         queries = self.get_postrope_queries(module, hidden_states, kwargs["position_embeddings"])[0] # batch_idx=0
-        # queries = self.get_postrope_queries(module, hidden_states, pos_emb)[0] # batch_idx=0
         num_heads = queries.shape[0]
 
         fixed_boundaries = torch.arange(self.chunk_length, kv_len, self.chunk_length, device=keys.device) # (num_boundaries) # 예: kv_len=100, chunk_len=10일 때 [10, 20, 30, 40, 50, 60, 70, 80, 90] --> 0, 100 제외한 나머지 경계
@@ -93,8 +96,6 @@ class VariableChunkKVPress3(BasePress):
         candidate_idx = (fixed_boundaries.view(-1, 1) + offsets.view(1, -1)).clamp(1, kv_len - 1) # (num_boundaries, window_width) # 각 고정 경계 주변의 후보 인덱스 # .clamp()로 idx가 시퀀스 범위 벗어나지 않게 예외처리
 
         # 2-1. 후보 토큰의 Query (q_candidate) 구하기
-        # q_idx = candidate_idx.view(1, num_boundaries, window_width, 1).expand(num_heads, -1, -1, head_dim) # candidate_idx의 shape을 확장
-        # q_candidate = queries.unsqueeze(1).expand(-1, num_boundaries, -1, -1).gather(2, q_idx) # (num_heads, num_boundaries, window_width, head_dim)
         q_idx_flat = candidate_idx.view(-1)
         q_candidate = queries[:, q_idx_flat, :].view(num_heads, num_boundaries, window_width, head_dim)
 
@@ -102,13 +103,6 @@ class VariableChunkKVPress3(BasePress):
         chunk_starts = (fixed_boundaries - self.chunk_length).view(-1, 1).expand(-1, window_width) # (num_boundaries, window_width)
 
         key_cumsum = torch.cumsum(keys[0].float(), dim=1) # 누적합 (청크 내 평균 Key를 빠르게 구하기 위함) # (num_kv_heads, kv_len, head_dim)
-        # def get_k_cumsum_at_idx(cumsum, idx):
-        #     expanded_idx = idx.view(1, num_boundaries, window_width, 1).expand(num_kv_heads, -1, -1, head_dim) # (num_kv_heads, num_boundaries, window_width, head_dim)로 확장
-        #     return cumsum.unsqueeze(1).expand(-1, num_boundaries, -1, -1).gather(2, expanded_idx)
-        
-        # k_candidates = get_k_cumsum_at_idx(key_cumsum, (candidate_idx - 1).clamp(min=0)) # 후보 토큰 직전까지
-        # k_starts = get_k_cumsum_at_idx(key_cumsum, (chunk_starts - 1).clamp(min=0)) # 청크 시작부터
-        # k_starts = torch.where(chunk_starts.unsqueeze(0).unsqueeze(-1).expand_as(k_starts) > 0, k_starts, 0.0) # chunk_starts가 0인 지점의 k_starts를 0으로 세팅 
         k_cand_idx = (candidate_idx - 1).clamp(min=0).view(-1)
         k_start_idx = (chunk_starts - 1).clamp(min=0).view(-1)
         k_candidates = key_cumsum[:, k_cand_idx, :].view(num_kv_heads, num_boundaries, window_width, head_dim)
@@ -121,31 +115,58 @@ class VariableChunkKVPress3(BasePress):
         # 2-3. QK^T로 Similarity 계산
         if num_heads != num_kv_heads: # custom repeat_kv
             n_rep = num_heads // num_kv_heads
-            # k_interval_mean = ( 
-            #     k_interval_mean[:, None, :, :, :]
-            #     .expand(num_kv_heads, n_rep, num_boundaries, window_width, head_dim)
-            #     .reshape(num_kv_heads * n_rep, num_boundaries, window_width, head_dim)
-            # )
             k_interval_mean = k_interval_mean.repeat_interleave(n_rep, dim=0)
         
         similarity = (q_candidate * k_interval_mean).sum(dim=-1) / math.sqrt(head_dim) # (num_heads, num_boundaries, window_width)
         similarity = similarity.sum(dim=0) # head 차원으로 합산                         -> (           num_boundaries, window_width)
         
+        # --- [수정 및 추가] Linguistic Constraint 필터링 ---
+        # 1. 후보 인덱스의 토큰 ID들을 가져와 문자열로 변환
+        flat_cand_idx = candidate_idx.view(-1)
+        print(self.input_ids.shape)
+        cand_ids = self.input_ids[0,flat_cand_idx].tolist()
+        cand_tokens = self.tokenizer.convert_ids_to_tokens(cand_ids)
+
+        # 2. 유효한 경계 후보인지 판단하는 마스크 생성
+        # 조건: ' ' (U+2581)로 시작하거나, 알파벳/숫자가 아닌 특수문자/구두점인 경우
+        valid_mask = torch.tensor(
+            [(t.startswith(' ') or not t.replace(' ', '').isalnum()) for t in cand_tokens],
+            device=similarity.device, dtype=torch.bool
+        ).view(num_boundaries, window_width)
+
+        # 3. 단어 중간 파편(valid_mask가 False인 곳)에 아주 큰 페널티 부여
+        # float('inf')를 쓰면 모든 후보가 무효할 때 에러가 날 수 있으므로 충분히 큰 값 사용
+        similarity.masked_fill_(~valid_mask, 1e9)
+        # -----------------------------------------------
+
         best_offsets = similarity.argmin(dim=-1) # (num_boundaries)
         final_boundaries = candidate_idx.gather(1, best_offsets.view(-1, 1)).squeeze(-1) # (num_boundaries)
 
+        # --- 관찰: 경계 토큰 출력 (디버깅용) ---
+        print(f"\n{'='*30} Boundary Analysis {'='*30}")
+        
+        for i, b_idx in enumerate(final_boundaries):
+            idx = b_idx.item()
+            min_score = similarity[i, best_offsets[i]].item()
+            avg_win_score = similarity[i].mean().item()
+            
+            # 토큰 텍스트 추출 (tokenizer가 전역 변수나 self에 있다고 가정)
+            token_id = self.input_ids[0, idx].item()
+            token_text = self.tokenizer.decode([token_id]) 
+
+            # 결과 출력: 경계 번호, 인덱스, 토큰, 스코어(최소값 vs 창 평균)
+            print(f"Boundary {i+1:2d} | Index: {idx:4d} | Token: ({token_text}) ID:{token_id} | "
+                  f"Score: {min_score:.4f} (Win Avg: {avg_win_score:.4f})")
+        
+        print(f"{'='*79}\n")
+        # --- 관찰 코드 끝 ---
 
         # 3. Calculate chunk_scores from scores
         chunk_ids = torch.zeros(kv_len, device=keys.device, dtype=torch.long)
         chunk_ids = chunk_ids.scatter_(0, final_boundaries, 1).cumsum(dim=0) # (kv_len)
         num_chunks = chunk_ids[-1] + 1
 
-        # chunk_scores = torch.zeros(num_chunks, device=keys.device, dtype=global_scores.dtype) # (num_chunks,)
-        # chunk_scores = chunk_scores.scatter_reduce(
-        #     dim=0, index=chunk_ids, src=global_scores[0].mean(dim=0), reduce="mean", include_self=False
-        # ) # src: batch 차원으로 [0]이고, head 차원으로 평균 낸 global_scores
         mean_global_scores = global_scores[0].mean(dim=0)
-        # chunk_scores.scatter_reduce_(0, chunk_ids, mean_global_scores, reduce="mean", include_self=False)
         chunk_scores  = torch.zeros(num_chunks, device=keys.device, dtype=mean_global_scores.dtype)
         chunk_counts  = torch.zeros(num_chunks, device=keys.device, dtype=torch.long)
         chunk_scores.index_add_(0, chunk_ids, mean_global_scores)
@@ -165,8 +186,6 @@ class VariableChunkKVPress3(BasePress):
         # indices에 반영하기
         indices = []
         if num_complete_chunks > 0: # complete_chunks 처리
-            # complete_chunk_ids = chunk_indices[:num_complete_chunks] # (num_complete_chunks,)
-            # indices.append(torch.where(torch.isin(chunk_ids, complete_chunk_ids))[0]) # torch.isin: boolean mask 반환. chunk_ids (seq_len)의 각 요소가 complete_chunk_ids 리스트에 포함되어 있나
             chunk_rank = torch.empty_like(chunk_indices)
             chunk_rank[chunk_indices] = torch.arange(num_chunks, device=keys.device)
             mask = chunk_rank[chunk_ids] < num_complete_chunks
